@@ -60,7 +60,7 @@ from mdtraj.core.topology import Topology
 from mdtraj.core.residue_names import _SOLVENT_TYPES
 from mdtraj.utils import (ensure_type, in_units_of, lengths_and_angles_to_box_vectors,
                           box_vectors_to_lengths_and_angles, cast_indices,
-                          deprecated)
+                          deprecated, import_)
 from mdtraj.utils.six.moves import xrange
 from mdtraj.utils.six import PY3, string_types
 from mdtraj import _rmsd
@@ -1322,6 +1322,32 @@ class Trajectory(object):
             Overwrite anything that exists at filename, if its already there
         """
         with HDF5TrajectoryFile(filename, 'w', force_overwrite=force_overwrite) as f:
+            f.write(coordinates=in_units_of(self.xyz, Trajectory._distance_unit, f.distance_unit),
+                    time=self.time,
+                    cell_lengths=in_units_of(self.unitcell_lengths, Trajectory._distance_unit, f.distance_unit),
+                    cell_angles=self.unitcell_angles)
+            f.topology = self.topology
+
+    def add_traj_hdf5(self, filename, root_uep):
+        """Save trajectory to MDTraj HDF5 format within an existing group structure.
+
+        Parameters
+        ----------
+        filename : str
+            filesystem path in which to save the trajectory
+        root_uep : str
+            group within filename where to save the trajectory. i.e. '/pdbs/pdb0'
+            This root must already exist!!
+        """
+        h5py = import_('h5py')
+
+        try:
+            with h5py.File(filename, 'a') as f:
+                f.create_group(root_uep)
+        except ValueError:
+            pass
+
+        with HDF5TrajectoryFile(filename, 'a', root_uep=root_uep) as f:
             f.write(coordinates=in_units_of(self.xyz, Trajectory._distance_unit, f.distance_unit),
                     time=self.time,
                     cell_lengths=in_units_of(self.unitcell_lengths, Trajectory._distance_unit, f.distance_unit),

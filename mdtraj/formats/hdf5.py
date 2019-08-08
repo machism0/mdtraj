@@ -66,7 +66,7 @@ Frames = namedtuple('Frames', ['coordinates', 'time', 'cell_lengths', 'cell_angl
 
 @FormatRegistry.register_loader('.h5')
 @FormatRegistry.register_loader('.hdf5')
-def load_hdf5(filename, stride=None, atom_indices=None, frame=None):
+def load_hdf5(filename, stride=None, atom_indices=None, frame=None, root_uep='/'):
     """Load an MDTraj hdf5 trajectory file from disk.
 
     Parameters
@@ -83,6 +83,11 @@ def load_hdf5(filename, stride=None, atom_indices=None, frame=None):
         Use this option to load only a single frame from a trajectory on disk.
         If frame is None, the default, the entire trajectory will be loaded.
         If supplied, ``stride`` will be ignored.
+    root_uep : str, default='/'
+        The root User Entry Point. This is a group in the HDF5 hierarchy which will be taken as the starting point to
+        create the object tree. It can be whatever existing group in the file, named by its HDF5 path. If it does not
+        exist, an HDF5ExtError is issued. Use this if you do not want to build the entire object tree, but rather only
+        a subtree of it.
 
     Examples
     --------
@@ -110,7 +115,7 @@ def load_hdf5(filename, stride=None, atom_indices=None, frame=None):
 
     atom_indices = cast_indices(atom_indices)
 
-    with HDF5TrajectoryFile(filename) as f:
+    with HDF5TrajectoryFile(filename, root_uep=root_uep) as f:
         if frame is not None:
             f.seek(frame)
             n_frames = 1
@@ -148,6 +153,11 @@ class HDF5TrajectoryFile(object):
     compression : {'zlib', None}
         Apply compression to the file? This will save space, and does not
         cost too many cpu cycles, so it's recommended.
+    root_uep : str, default='/'
+        The root User Entry Point. This is a group in the HDF5 hierarchy which will be taken as the starting point to
+        create the object tree. It can be whatever existing group in the file, named by its HDF5 path. If it does not
+        exist, an HDF5ExtError is issued. Use this if you do not want to build the entire object tree, but rather only
+        a subtree of it.
 
     Attributes
     ----------
@@ -166,7 +176,7 @@ class HDF5TrajectoryFile(object):
     """
     distance_unit = 'nanometers'
 
-    def __init__(self, filename, mode='r', force_overwrite=True, compression='zlib'):
+    def __init__(self, filename, mode='r', force_overwrite=True, compression='zlib', root_uep='/'):
         self._open = False  # is the file handle currently open?
         self.mode = mode  # the mode in which the file was opened?
 
@@ -186,7 +196,12 @@ class HDF5TrajectoryFile(object):
         else:
             raise ValueError('compression must be either "zlib" or None')
 
-        self._handle = self._open_file(filename, mode=mode, filters=compression)
+        try:
+            self._handle = self._open_file(filename, mode=mode, filters=compression, root_uep=root_uep)
+        except self.tables.exceptions.HDF5ExtError:  # Cannot find group
+            raise ValueError('The group {root_uep} was not found in {filename}. '
+                             'Create the group first.'.format(root_uep=root_uep, filename=filename))
+
         self._open = True
 
         if mode == 'w':
@@ -266,7 +281,7 @@ class HDF5TrajectoryFile(object):
             A topology object
         """
         try:
-            raw = self._get_node('/', name='topology')[0]
+            raw = self._get_node(self._handle.root, name='topology')[0]
             if not isinstance(raw, string_types):
                 raw = raw.decode()
             topology_dict = json.loads(raw)
@@ -366,7 +381,7 @@ class HDF5TrajectoryFile(object):
 
         # actually set the tables
         try:
-            self._remove_node(where='/', name='topology')
+            self._remove_node(where=self._handle.root, name='topology')
         except self.tables.NoSuchNodeError:
             pass
 
@@ -375,9 +390,9 @@ class HDF5TrajectoryFile(object):
             data = data.encode('ascii')
 
         if self.tables.__version__ >= '3.0.0':
-            self._handle.create_array(where='/', name='topology', obj=[data])
+            self._handle.create_array(where=self._handle.root, name='topology', obj=[data])
         else:
-            self._handle.createArray(where='/', name='topology', object=[data])
+            self._handle.createArray(where=self._handle.root, name='topology', object=[data])
 
     #####################################################
     # randomState global attribute (optional)
@@ -473,7 +488,7 @@ class HDF5TrajectoryFile(object):
                              'currently, I don\'t do any casting' % dtype)
 
         if not hasattr(self._handle.root, 'constraints'):
-            self._create_table(where='/', name='constraints',
+            self._create_table(where=self._handle.root, name='constraints',
                                description=dtype)
 
         self._handle.root.constraints.truncate(0)
@@ -590,7 +605,7 @@ class HDF5TrajectoryFile(object):
 
         def get_field(name, slice, out_units, can_be_none=True):
             try:
-                node = self._get_node(where='/', name=name)
+                node = self._get_node(where=self._handle.root, name=name)
                 data = node.__getitem__(slice)
                 in_units = node.attrs.units
                 if not isinstance(in_units, string_types):
@@ -757,12 +772,12 @@ class HDF5TrajectoryFile(object):
                          'velocities', 'kineticEnergy', 'potentialEnergy', 'temperature']:
                 contents = locals()[name]
                 if contents is not None:
-                    self._get_node(where='/', name=name).append(contents)
+                    self._get_node(where=self._handle.root, name=name).append(contents)
                 if contents is None:
                     # for each attribute that they're not saving, we want
                     # to make sure the file doesn't explect it
                     try:
-                        self._get_node(where='/', name=name)
+                        self._get_node(where=self._handle.root, name=name)
                         raise AssertionError()
                     except self.tables.NoSuchNodeError:
                         pass
@@ -772,10 +787,10 @@ class HDF5TrajectoryFile(object):
             # but the name in this python function is alchemicalLambda
             name = 'lambda'
             if alchemicalLambda is not None:
-                self._get_node(where='/', name=name).append(alchemicalLambda)
+                self._get_node(where=self._handle.root, name=name).append(alchemicalLambda)
             else:
                 try:
-                    self._get_node(where='/', name=name)
+                    self._get_node(where=self._handle.root, name=name)
                     raise AssertionError()
                 except self.tables.NoSuchNodeError:
                     pass
@@ -815,47 +830,47 @@ class HDF5TrajectoryFile(object):
 
         # create arrays that store frame level informat
         if set_coordinates:
-            self._create_earray(where='/', name='coordinates',
+            self._create_earray(where=self._handle.root, name='coordinates',
                 atom=self.tables.Float32Atom(), shape=(0, self._n_atoms, 3))
             self._handle.root.coordinates.attrs['units'] = 'nanometers'
 
         if set_time:
-            self._create_earray(where='/', name='time',
+            self._create_earray(where=self._handle.root, name='time',
                 atom=self.tables.Float32Atom(), shape=(0,))
             self._handle.root.time.attrs['units'] = 'picoseconds'
 
         if set_cell:
-            self._create_earray(where='/', name='cell_lengths',
+            self._create_earray(where=self._handle.root, name='cell_lengths',
                 atom=self.tables.Float32Atom(), shape=(0, 3))
-            self._create_earray(where='/', name='cell_angles',
+            self._create_earray(where=self._handle.root, name='cell_angles',
                 atom=self.tables.Float32Atom(), shape=(0, 3))
             self._handle.root.cell_lengths.attrs['units'] = 'nanometers'
             self._handle.root.cell_angles.attrs['units'] = 'degrees'
 
         if set_velocities:
-            self._create_earray(where='/', name='velocities',
+            self._create_earray(where=self._handle.root, name='velocities',
                 atom=self.tables.Float32Atom(), shape=(0, self._n_atoms, 3))
             self._handle.root.velocities.attrs['units'] = 'nanometers/picosecond'
 
         if set_kineticEnergy:
-            self._create_earray(where='/', name='kineticEnergy',
+            self._create_earray(where=self._handle.root, name='kineticEnergy',
                 atom=self.tables.Float32Atom(), shape=(0,))
             self._handle.root.kineticEnergy.attrs['units'] = 'kilojoules_per_mole'
 
         if set_potentialEnergy:
-            self._create_earray(where='/', name='potentialEnergy',
+            self._create_earray(where=self._handle.root, name='potentialEnergy',
                 atom=self.tables.Float32Atom(), shape=(0,))
             self._handle.root.potentialEnergy.attrs['units'] = 'kilojoules_per_mole'
 
         if set_temperature:
-            self._create_earray(where='/', name='temperature',
+            self._create_earray(where=self._handle.root, name='temperature',
                 atom=self.tables.Float32Atom(), shape=(0,))
             self._handle.root.temperature.attrs['units'] = 'kelvin'
 
         if set_alchemicalLambda:
-            self._create_earray(where='/', name='lambda',
+            self._create_earray(where=self._handle.root, name='lambda',
                 atom=self.tables.Float32Atom(), shape=(0,))
-            self._get_node('/', name='lambda').attrs['units'] = 'dimensionless'
+            self._get_node(self._handle.root, name='lambda').attrs['units'] = 'dimensionless'
 
     def seek(self, offset, whence=0):
         """Move to a new file position
